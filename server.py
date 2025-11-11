@@ -49,24 +49,48 @@ def login(conn):
 	login_response.write(protocol)
 	serialized = transport.getvalue()
 
-	conn.sendall(serialized)
-	data = conn.recv(1024)
+	try:
+		conn.sendall(serialized)
+	except (BrokenPipeError, ConnectionResetError, OSError) as e:
+		print(f"Socket error: {e}")
+		conn.close()
+		return
+	except Exception as e:
+		print(f"Unexpected error: {e}")
+		conn.close()
+		return
+	try:
+		data = conn.recv(65536)
+		if data == b'':
+			print("Clean disconnect at login")
+			conn.close()
+			return
 
-	transport = TTransport.TMemoryBuffer(data)
-	protocol = TCompactProtocol.TCompactProtocol(transport)
-	msg = ChatProtocol()
-	msg.read(protocol)
+		transport = TTransport.TMemoryBuffer(data)
+		protocol = TCompactProtocol.TCompactProtocol(transport)
+		msg = ChatProtocol()
+		msg.read(protocol)
 
-	if msg.type == MessageType.LOGIN_REQUEST:
-		if msg.loginRequest is None:
-			print("Malformed LOGIN_REQUEST message")
+		if msg.type == MessageType.LOGIN_REQUEST:
+			if msg.loginRequest is None:
+				print("Malformed LOGIN_REQUEST message")
+				conn.close()
+				return
 
-		name = msg.loginRequest.username
-		with lock:
-			users[name] = conn
-		connections_queue2.put((conn, name))
-	else:
-		print("Login request is not LOGIN_REQUEST")
+			name = msg.loginRequest.username
+			with lock:
+				users[name] = conn
+			connections_queue2.put((conn, name))
+		else:
+			print("Login request is not LOGIN_REQUEST")
+			conn.close()
+			return
+	except (BrokenPipeError, ConnectionResetError, OSError) as e:
+		print(f"Socket error: {e}")
+		conn.close()
+	except Exception as e:
+		print(f"Unexpected error: {e}")
+		conn.close()
 
 def receive_messages_from_queue():
 	while True:
@@ -79,49 +103,57 @@ def receive_messages(conn, name):
 		ready_to_read, _, _ = select.select([conn], [], []) # no timeout means blocking
 
 		if conn in ready_to_read:
-			data = conn.recv(1024)
+			try:
+				data = conn.recv(65536)
 
-			if data == b'':
-				with lock:
-					del users[name]
-				print(f"Client {name} is down.")
-				break
+				if data == b'':
+					print(f"Client {name} is down.")
+					with lock:
+						del users[name]
+					conn.close()
+					break
 
-			transport = TTransport.TMemoryBuffer(data)
-			protocol = TCompactProtocol.TCompactProtocol(transport)
-			msg = ChatProtocol()
-			msg.read(protocol)
-
-			if msg.type == MessageType.SHOW_USERS_REQUEST:
-				if msg.showUsersRequest is None:
-					print("Malformed SHOW_USER_REQUEST message")
-
-				names = list(users.keys())
-				show_users_response = ChatProtocol(MessageType.SHOW_USERS_RESPONSE, showUsersResponse=ShowUsersResponse(names))
-
-				transport = TTransport.TMemoryBuffer()
+				transport = TTransport.TMemoryBuffer(data)
 				protocol = TCompactProtocol.TCompactProtocol(transport)
-				show_users_response.write(protocol)
-				serialized = transport.getvalue()
+				msg = ChatProtocol()
+				msg.read(protocol)
 
-				conn.sendall(serialized)
-			elif msg.type == MessageType.SEND_MESSAGE_REQUEST:
-				if msg.sendMessageRequest is None:
-					print("Malformed SEND_MESSAGE_REQUEST message")
+				if msg.type == MessageType.SHOW_USERS_REQUEST:
+					if msg.showUsersRequest is None:
+						print("Malformed SHOW_USER_REQUEST message")
 
-				recipient, message = msg.sendMessageRequest.recipient, msg.sendMessageRequest.message
-				if recipient not in users:
+					names = None
+					with lock:
+						names = list(users.keys())
+					if names is None:
+						print("Unable to get usernames with lock")
+						continue
+					show_users_response = ChatProtocol(MessageType.SHOW_USERS_RESPONSE, showUsersResponse=ShowUsersResponse(names))
+
 					transport = TTransport.TMemoryBuffer()
 					protocol = TCompactProtocol.TCompactProtocol(transport)
-					error_message = ChatProtocol(MessageType.ERROR, errorMessage=ErrorMessage(f"{recipient} is not online"))
-					error_message.write(protocol)
+					show_users_response.write(protocol)
 					serialized = transport.getvalue()
 
 					conn.sendall(serialized)
-					continue
-				sender = name
-				message_queue.put((sender, recipient, message))
-			
+				elif msg.type == MessageType.SEND_MESSAGE_REQUEST:
+					if msg.sendMessageRequest is None:
+						print("Malformed SEND_MESSAGE_REQUEST message")
+
+					recipient, message = msg.sendMessageRequest.recipient, msg.sendMessageRequest.message
+					sender = name
+					message_queue.put((sender, recipient, message))
+			except (BrokenPipeError, ConnectionResetError, OSError) as e:
+				print(f"Socket error: {e}")
+				with lock:
+					if name in users:
+						del users[name]
+				conn.close()
+				break
+			except Exception as e:
+				print(f"Unexpected error: {e}")
+				conn.close()
+				break
 		else:
 			("No message available.")
 
@@ -132,15 +164,43 @@ def send_message_from_queue():
 		send_thread.start()
 
 def send_message(sender, recipient, message):
-	conn = users[recipient]
+	conn = None
+	return_to_sender = None
+	with lock:
+		if recipient not in users: # send error message to sender
+			if sender in users:
+				conn = users[sender]
+				return_to_sender = True
+			else:
+				print(f"Recipient {recipient} and sender {sender} is not online")
+				return
+		else:			
+			conn = users[recipient]
+			return_to_sender = False
 
 	transport = TTransport.TMemoryBuffer()
 	protocol = TCompactProtocol.TCompactProtocol(transport)
-	receive_message = ChatProtocol(MessageType.RECEIVE_MESSAGE, receiveMessage=ReceiveMessage(sender, message))
-	receive_message.write(protocol)
+	chat_protocol = None
+	if return_to_sender:
+		chat_protocol = ChatProtocol(MessageType.ERROR, errorMessage=ErrorMessage(f"{recipient} is not online"))
+	else:
+		chat_protocol = ChatProtocol(MessageType.RECEIVE_MESSAGE, receiveMessage=ReceiveMessage(sender, message))
+	chat_protocol.write(protocol)
 	serialized = transport.getvalue()
 
-	conn.sendall(serialized)
+	try:
+		conn.sendall(serialized)
+	except (BrokenPipeError, ConnectionResetError, OSError) as e:
+		print(f"Socket error: {e}")
+		with lock:
+			if return_to_sender:
+				if sender in users:
+					del users[sender]
+			else:
+				if recipient in users:
+					del users[recipient]
+	except Exception as e:
+		print(f"Unexpected error: {e}")
 
 server_socket = None
 while True:

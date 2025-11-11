@@ -30,65 +30,75 @@ def connect_to_server():
 	return client_socket
 
 def login(client_socket):
-	data = client_socket.recv(1024)
-	transport = TTransport.TMemoryBuffer(data)
-	protocol = TCompactProtocol.TCompactProtocol(transport)
-	msg = ChatProtocol()
-	msg.read(protocol)
-
-	if msg.type == MessageType.LOGIN_RESPONSE:
-		if msg.loginResponse is None:
-			print("Malformed LOGIN_RESPONSE message")
-
-		print(msg.loginResponse.prompt)  # What is your name?
-		name = ""
-		while not name:
-			name = input()
-
-		transport = TTransport.TMemoryBuffer()
+	try:
+		data = client_socket.recv(65536)
+		transport = TTransport.TMemoryBuffer(data)
 		protocol = TCompactProtocol.TCompactProtocol(transport)
-		login_request = ChatProtocol(MessageType.LOGIN_REQUEST, loginRequest=LoginRequest(name))
-		login_request.write(protocol)
-		serialized = transport.getvalue()
+		msg = ChatProtocol()
+		msg.read(protocol)
 
-		client_socket.sendall(serialized)
-	else:
-		print("Login response is not LOGIN_RESPONSE")
+		if msg.type == MessageType.LOGIN_RESPONSE:
+			if msg.loginResponse is None:
+				print("Malformed LOGIN_RESPONSE message")
+
+			print(msg.loginResponse.prompt)  # What is your name?
+			name = ""
+			while not name:
+				name = input()
+
+			transport = TTransport.TMemoryBuffer()
+			protocol = TCompactProtocol.TCompactProtocol(transport)
+			login_request = ChatProtocol(MessageType.LOGIN_REQUEST, loginRequest=LoginRequest(name))
+			login_request.write(protocol)
+			serialized = transport.getvalue()
+
+			client_socket.sendall(serialized)
+		else:
+			print("Login response is not LOGIN_RESPONSE")
+	except (BrokenPipeError, ConnectionResetError, OSError) as e:
+		print(f"Socket error: {e}")
+	except Exception as e:
+		print(f"Unexpected error: {e}")
 
 def receive_messages():
 	while True:
 		ready_to_read, _, _ = select.select([client_socket], [], []) # no timeout means blocking
 
 		if client_socket in ready_to_read:
-			data = client_socket.recv(1024)
-			if data == b'':
-				print("Server is down")
-				break
+			try:
+				data = client_socket.recv(65536)
+				if data == b'':
+					print("Server is down")
+					break
 
-			transport = TTransport.TMemoryBuffer(data)
-			protocol = TCompactProtocol.TCompactProtocol(transport)
-			msg = ChatProtocol()
-			msg.read(protocol)
+				transport = TTransport.TMemoryBuffer(data)
+				protocol = TCompactProtocol.TCompactProtocol(transport)
+				msg = ChatProtocol()
+				msg.read(protocol)
 
-			if msg.type == MessageType.SHOW_USERS_RESPONSE:
-				if msg.showUsersResponse is None:
-					print("Malformed SHOW_USERS_RESPONSE message")
+				if msg.type == MessageType.SHOW_USERS_RESPONSE:
+					if msg.showUsersResponse is None:
+						print("Malformed SHOW_USERS_RESPONSE message")
 
-				users = msg.showUsersResponse.users
-				print("users: " + str(users))
-			elif msg.type == MessageType.RECEIVE_MESSAGE:
-				if msg.receiveMessage is None:
-					print("Malformed RECEIVE_MESSAGE message")
+					users = msg.showUsersResponse.users
+					print("users: " + str(users))
+				elif msg.type == MessageType.RECEIVE_MESSAGE:
+					if msg.receiveMessage is None:
+						print("Malformed RECEIVE_MESSAGE message")
 
-				sender, message = msg.receiveMessage.sender, msg.receiveMessage.message
-				print(f"{sender}: {message}")
-			elif msg.type == MessageType.ERROR:
-				if msg.errorMessage is None:
-					print("Malformed ERROR message")
-				error = msg.errorMessage.error
-				print(error)
-			else:
-				print("Receive message is not RECEIVE_MESSAGE")
+					sender, message = msg.receiveMessage.sender, msg.receiveMessage.message
+					print(f"{sender}: {message}")
+				elif msg.type == MessageType.ERROR:
+					if msg.errorMessage is None:
+						print("Malformed ERROR message")
+					error = msg.errorMessage.error
+					print(error)
+				else:
+					print("Receive message is not RECEIVE_MESSAGE")
+			except (BrokenPipeError, ConnectionResetError, OSError) as e:
+				print(f"Socket error: {e}")
+			except Exception as e:
+				print(f"Unexpected error: {e}")
 		else:
 			("No message available.")
 
@@ -107,7 +117,12 @@ def send_messages():
 			show_users_request.write(protocol)
 			serialized = transport.getvalue()
 
-			client_socket.sendall(serialized)
+			try:
+				client_socket.sendall(serialized)
+			except (BrokenPipeError, ConnectionResetError, OSError) as e:
+				print(f"Socket error: {e}")
+			except Exception as e:
+				print(f"Unexpected error: {e}")
 		elif message[:9] == "/message ":
 			recipient, message = get_message_attributes(message)
 
@@ -117,7 +132,12 @@ def send_messages():
 			send_message_request.write(protocol)
 			serialized = transport.getvalue()
 
-			client_socket.sendall(serialized)
+			try:
+				client_socket.sendall(serialized)
+			except (BrokenPipeError, ConnectionResetError, OSError) as e:
+				print(f"Socket error: {e}")
+			except Exception as e:
+				print(f"Unexpected error: {e}")
 		else:
 			print("Invalid message. use /show or \'/message recipient message\'")
 
